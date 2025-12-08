@@ -9,16 +9,14 @@ jobs:
 
     steps:
 
-    - name: Install Docker
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y docker.io
+    - name: Check Docker
+      run: docker --version
 
     - name: Pull Kali Linux Image
       run: |
         sudo docker pull kalilinux/kali-rolling
 
-    - name: Start Kali Container (with NET_ADMIN)
+    - name: Start Kali Container
       run: |
         sudo docker run -d --name kali \
           --hostname kali-runner \
@@ -46,7 +44,7 @@ jobs:
         echo "SSH_USER=kaliuser" >> $GITHUB_ENV
         echo "SSH_PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Install Tailscale inside Kali (Correct Debian method)
+    - name: Install Tailscale inside Kali
       run: |
         sudo docker exec kali bash -c "
           apt-get update &&
