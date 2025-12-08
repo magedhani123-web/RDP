@@ -1,59 +1,83 @@
-name: Linux-SSH
+name: Kali-SSH
 on:
   workflow_dispatch:
 
 jobs:
-  ssh-access:
+  kali:
     runs-on: ubuntu-latest
     timeout-minutes: 3600
 
     steps:
-    - name: Update & Install SSH
+    - name: Pull Kali Linux Image
       run: |
         sudo apt-get update
-        sudo apt-get install -y openssh-server
-        sudo systemctl enable ssh
-        sudo systemctl start ssh
-        sudo ufw allow 22/tcp || true
+        sudo apt-get install -y docker.io
+        sudo docker pull kalilinux/kali-rolling
 
-    - name: Create SSH User
+    - name: Start Kali Container
       run: |
-        PASS=$(tr -dc A-Za-z0-9\!\@\#\$\%\^\&\*\(\) </dev/urandom | head -c 18)
-        sudo useradd -m -s /bin/bash linuxuser
-        echo "linuxuser:$PASS" | sudo chpasswd
+        sudo docker run -d --name kali \
+          --hostname kali-runner \
+          -p 22:22 \
+          kalilinux/kali-rolling sleep infinity
 
-        echo "SSH_USER=linuxuser" >> $GITHUB_ENV
+    - name: Install SSH inside Kali
+      run: |
+        sudo docker exec kali bash -c "
+          apt-get update &&
+          apt-get install -y openssh-server &&
+          mkdir -p /var/run/sshd &&
+          sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+          service ssh start
+        "
+
+    - name: Create User in Kali
+      run: |
+        PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)
+        sudo docker exec kali bash -c "
+          useradd -m -s /bin/bash kaliuser &&
+          echo 'kaliuser:$PASS' | chpasswd
+        "
+        echo "SSH_USER=kaliuser" >> $GITHUB_ENV
         echo "SSH_PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Install Tailscale (Ubuntu 24.04 Noble)
+    - name: Install Tailscale inside Kali
       run: |
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.list | sudo tee /etc/apt/sources.list.d/tailscale.list >/dev/null
-        sudo apt-get update
-        sudo apt-get install -y tailscale
+        sudo docker exec kali bash -c "
+          curl -fsSL https://tailscale.com/install.sh | sh
+        "
 
     - name: Connect Tailscale
       run: |
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=linux-runner-$GITHUB_RUN_ID
-        sleep 5
-        TSIP=$(tailscale ip -4)
+        sudo docker exec kali bash -c "
+          tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-$GITHUB_RUN_ID
+        "
+        TSIP=$(sudo docker exec kali tailscale ip -4)
         echo "TS_IP=$TSIP" >> $GITHUB_ENV
 
-    - name: Show Connection Info
+    - name: Install Kali Tools
+      run: |
+        sudo docker exec kali bash -c "
+          apt-get update &&
+          apt-get install -y \
+            nmap hydra metasploit-framework sqlmap \
+            wireshark-qt john nikto gobuster \
+            netcat-traditional
+        "
+
+    - name: Show SSH Info
       run: |
         echo ""
-        echo "===================================="
-        echo " SSH ACCESS INFO "
-        echo "------------------------------------"
+        echo "==================== Kali SSH ===================="
         echo "IP:       $TS_IP"
         echo "User:     $SSH_USER"
         echo "Password: $SSH_PASS"
-        echo "===================================="
+        echo "=================================================="
         echo ""
 
-    - name: Keep alive
+    - name: Keep Alive
       run: |
         while true; do
-          echo "[$(date)] SSH Active..."
+          echo "[$(date)] Kali Linux Active..."
           sleep 300
         done
