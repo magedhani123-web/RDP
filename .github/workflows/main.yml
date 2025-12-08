@@ -8,16 +8,21 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-    - name: Pull Kali Linux Image
+
+    - name: Install Docker
       run: |
         sudo apt-get update
         sudo apt-get install -y docker.io
+
+    - name: Pull Kali Linux Image
+      run: |
         sudo docker pull kalilinux/kali-rolling
 
-    - name: Start Kali Container
+    - name: Start Kali Container (with NET_ADMIN)
       run: |
         sudo docker run -d --name kali \
           --hostname kali-runner \
+          --cap-add NET_ADMIN \
           -p 22:22 \
           kalilinux/kali-rolling sleep infinity
 
@@ -28,7 +33,7 @@ jobs:
           apt-get install -y openssh-server &&
           mkdir -p /var/run/sshd &&
           sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-          service ssh start
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
         "
 
     - name: Create User in Kali
@@ -41,16 +46,21 @@ jobs:
         echo "SSH_USER=kaliuser" >> $GITHUB_ENV
         echo "SSH_PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Install Tailscale inside Kali
+    - name: Install Tailscale inside Kali (Correct Debian method)
       run: |
         sudo docker exec kali bash -c "
-          curl -fsSL https://tailscale.com/install.sh | sh
+          apt-get update &&
+          apt-get install -y curl &&
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.gpg | tee /usr/share/keyrings/tailscale.gpg >/dev/null &&
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.list | tee /etc/apt/sources.list.d/tailscale.list &&
+          apt-get update &&
+          apt-get install -y tailscale
         "
 
     - name: Connect Tailscale
       run: |
         sudo docker exec kali bash -c "
-          tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-$GITHUB_RUN_ID
+          tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-${GITHUB_RUN_ID}
         "
         TSIP=$(sudo docker exec kali tailscale ip -4)
         echo "TS_IP=$TSIP" >> $GITHUB_ENV
@@ -65,13 +75,17 @@ jobs:
             netcat-traditional
         "
 
+    - name: Start SSH Daemon
+      run: |
+        sudo docker exec -d kali bash -c "/usr/sbin/sshd -D"
+
     - name: Show SSH Info
       run: |
         echo ""
         echo "==================== Kali SSH ===================="
-        echo "IP:       $TS_IP"
-        echo "User:     $SSH_USER"
-        echo "Password: $SSH_PASS"
+        echo "Tailscale IP: $TS_IP"
+        echo "User:         $SSH_USER"
+        echo "Password:     $SSH_PASS"
         echo "=================================================="
         echo ""
 
