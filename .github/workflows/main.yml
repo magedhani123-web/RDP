@@ -1,153 +1,66 @@
-name: Kali-RDP-NoMachine-Tailscale
-
+name: RDP
 on:
   workflow_dispatch:
-
 jobs:
-  kali:
-    runs-on: ubuntu-latest
+  secure-rdp:
+    runs-on: windows-latest
     timeout-minutes: 3600
-
     steps:
-
-    # 0) معلومات runner
-    - name: Runner info
+    - name: Configure Core RDP Settings
       run: |
-        uname -a
-        lsb_release -a || true
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+        netsh advfirewall firewall delete rule name="RDP-Tailscale"
+        netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+        Restart-Service -Name TermService -Force
 
-    # 1) تثبيت Docker
-    - name: Install Docker
+    - name: Create RDP User with Secure Password
       run: |
-        if ! command -v docker >/dev/null 2>&1; then
-          curl -fsSL https://get.docker.com | sh
-          sudo systemctl enable --now docker
-        else
-          docker --version
-        fi
+        Add-Type -AssemblyName System.Security
+        $charSet = @{ Upper = [char[]](65..90); Lower = [char[]](97..122); Number = [char[]](48..57); Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)) }
+        $rawPassword = @()
+        $rawPassword += $charSet.Upper | Get-Random -Count 4
+        $rawPassword += $charSet.Lower | Get-Random -Count 4
+        $rawPassword += $charSet.Number | Get-Random -Count 4
+        $rawPassword += $charSet.Special | Get-Random -Count 4
+        $password = -join ($rawPassword | Sort-Object { Get-Random })
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+        echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+        if (-not (Get-LocalUser -Name "RDP")) { Write-Error "User creation failed"; exit 1 }
 
-    # 2) قتل أي Tailscale قديم
-    - name: Kill old Tailscale
-      run: |
-        sudo pkill tailscaled || true
-        sudo pkill tailscale || true
-
-    # 3) تثبيت Tailscale
     - name: Install Tailscale
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y curl gnupg
-        curl -fsSL https://tailscale.com/install.sh | sudo sh
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+        Remove-Item $installerPath -Force
 
-    # 4) تشغيل tailscaled والاتصال
-    - name: Start tailscaled and tailscale up
-      env:
-        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+    - name: Establish Tailscale Connection
       run: |
-        sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock >/tmp/tailscaled.log 2>&1 &
-        for i in $(seq 1 20); do
-          if sudo tailscale status >/dev/null 2>&1; then break; fi
-          sleep 1
-        done
-        sudo tailscale up --authkey="${TAILSCALE_AUTH_KEY}" --hostname="kali-${GITHUB_RUN_ID}" || true
-        TAILSCALE_IP="$(sudo tailscale ip -4 || true)"
-        echo "TAILSCALE_IP=${TAILSCALE_IP}" >> $GITHUB_ENV
-        sudo tailscale status || true
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+        $tsIP = $null
+        $retries = 0
+        while (-not $tsIP -and $retries -lt 10) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 5
+            $retries++
+        }
+        if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
+        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-    # 5) سحب صورة Kali
-    - name: Pull Kali Docker Image
-      run: sudo docker pull kalilinux/kali-rolling
-
-    # 6) حذف الكونتينر القديم
-    - name: Remove Old Container
-      run: sudo docker rm -f kali || true
-
-    # 7) إنشاء الكونتينر
-    - name: Create Kali Container
+    - name: Maintain Connection
       run: |
-        sudo docker run -d --name kali \
-          --hostname kali-gnome \
-          --privileged \
-          --cap-add=NET_ADMIN \
-          -p 3389:3389 \
-          -p 4000:4000 \
-          kalilinux/kali-rolling sleep infinity
-
-    # 8) إنشاء المستخدم kaliuser
-    - name: Create kaliuser inside container
-      run: |
-        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
-        sudo docker exec -i kali bash -lc "useradd -m -s /bin/bash kaliuser || true; echo \"kaliuser:${PASS}\" | chpasswd; usermod -aG sudo kaliuser || true; mkdir -p /home/kaliuser; chown -R kaliuser:kaliuser /home/kaliuser || true"
-        echo "RDP_USER=kaliuser" >> $GITHUB_ENV
-        echo "RDP_PASS=${PASS}" >> $GITHUB_ENV
-
-    # 9) تثبيت GNOME + XRDP + NoMachine
-    - name: Install GNOME + XRDP + NoMachine
-      run: |
-        sudo docker exec kali bash -lc "
-          set -e
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -y
-          apt-get install -y --no-install-recommends \
-            gnome-core gdm3 gnome-terminal \
-            xorgxrdp xrdp dbus-x11 xserver-xorg-core \
-            wget curl nano sudo inetutils-ping net-tools iptables nftables ca-certificates gnupg || true
-          echo 'gnome-session' > /root/.xsession
-          mkdir -p /home/kaliuser
-          echo 'gnome-session' > /home/kaliuser/.xsession
-          chown kaliuser:kaliuser /home/kaliuser/.xsession
-
-          # تثبيت NoMachine
-          NOMACHINE_DEB=/tmp/nomachine.deb
-          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O \${NOMACHINE_DEB} || true
-          if [ -f \"\${NOMACHINE_DEB}\" ]; then
-            dpkg -i \${NOMACHINE_DEB} || apt-get -y -f install
-          fi
-        "
-
-    # 10) تشغيل الخدمات
-    - name: Start Services
-      run: |
-        sudo docker exec -d kali bash -lc "rm -f /var/run/dbus/pid || true; /usr/bin/dbus-daemon --system --fork || true"
-        sudo docker exec -d kali bash -lc "mkdir -p /var/run/xrdp || true; /usr/sbin/xrdp-sesman || true"
-        sudo docker exec -d kali bash -lc "/usr/sbin/xrdp || true"
-        sudo docker exec -d kali bash -lc "if [ -x /usr/NX/bin/nxserver ]; then /usr/NX/bin/nxserver --startup || true; fi"
-        sleep 4
-        sudo docker exec kali ss -tulpen | grep -E '3389|4000' || true
-
-    # 11) تعطيل الجدار الناري
-    - name: Disable Firewall inside container
-      run: |
-        sudo docker exec kali bash -lc "
-          apt-get install -y iptables nftables || true
-          nft flush ruleset || true
-          iptables -F || true
-        "
-
-    # 12) عرض بيانات الوصول
-    - name: Show Access Info
-      run: |
-        echo ""
-        echo "===================================="
-        echo "       Kali Remote Access"
-        echo "===================================="
-        echo "Tailscale IP : ${TAILSCALE_IP:-<not-found>}"
-        echo "RDP          : ${TAILSCALE_IP:-<not-found>}:3389"
-        echo "NoMachine    : ${TAILSCALE_IP:-<not-found>}:4000"
-        echo "User         : $RDP_USER"
-        echo "Password     : $RDP_PASS"
-        echo "===================================="
-
-    # 13) Debug logs
-    - name: Debug Logs
-      run: |
-        echo '---- xrdp logs ----'
-        sudo docker exec kali bash -c "tail -n 200 /var/log/xrdp.log || true"
-        sudo docker exec kali bash -c "tail -n 200 /var/log/xrdp-sesman.log || true"
-        echo '---- NoMachine logs ----'
-        sudo docker exec kali bash -c "ls -la /usr/NX/var/log || true; tail -n 200 /usr/NX/var/log/* 2>/dev/null || true"
-
-    # 14) إبقاء الجلسة حية
-    - name: Keep Alive
-      run: |
-        while true; do sleep 300; done
+        Write-Host "`n=== RDP ACCESS ==="
+        Write-Host "Address: $env:TAILSCALE_IP"
+        Write-Host "Username: RDP"
+        Write-Host "Password: $(echo $env:RDP_CREDS)"
+        Write-Host "==================`n"
+        while ($true) {
+            Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+            Start-Sleep -Seconds 300
+        }
