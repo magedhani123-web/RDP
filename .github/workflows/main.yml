@@ -1,4 +1,4 @@
-name: Kali-SSH-Tailscale
+name: Kali-RDP-NoMachine-Tailscale
 on:
   workflow_dispatch:
 
@@ -8,87 +8,110 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-
-    - name: Check Docker
+    - name: Install Docker
       run: |
-        echo "== Docker version =="
-        docker --version || (echo "Docker not found — attempting install..." && curl -fsSL https://get.docker.com | sh && sudo systemctl start docker)
+        docker --version || (curl -fsSL https://get.docker.com | sh && sudo systemctl start docker)
 
-    - name: Install Tailscale on host (runner)
+    - name: Install Tailscale (host)
       run: |
         sudo apt-get update
         sudo apt-get install -y curl gnupg
-        # use official installer (handles distro selection)
         curl -fsSL https://tailscale.com/install.sh | sudo sh
 
-    - name: Start tailscaled and authenticate
+    - name: Start tailscaled + Login
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        # run tailscaled in background (use a state file in /tmp)
-        sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &>/tmp/tailscaled.log &
-        sleep 2
-        # bring up tailscale using your auth key
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-host-${GITHUB_RUN_ID}
-        # get the assigned tailscale IPv4
-        TS_IP=$(sudo tailscale ip -4)
-        echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-        echo "tailscaled log (last 50 lines):"
-        tail -n 50 /tmp/tailscaled.log || true
+        sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &
+        sleep 3
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-nx-${GITHUB_RUN_ID}
+        echo "TAILSCALE_IP=$(sudo tailscale ip -4)" >> $GITHUB_ENV
 
-    - name: Pull Kali image
-      run: |
-        sudo docker pull kalilinux/kali-rolling
+    - name: Pull Kali Docker Image
+      run: sudo docker pull kalilinux/kali-rolling
 
-    - name: Remove existing container (if any)
-      run: |
-        sudo docker rm -f kali || true
+    - name: Remove Old Container
+      run: sudo docker rm -f kali || true
 
-    - name: Start Kali container (map host 2222 -> container 22)
+    - name: Create Kali container (privileged) + expose ports
       run: |
         sudo docker run -d --name kali \
-          --hostname kali-runner \
-          --cap-add NET_ADMIN \
-          -p 2222:22 \
+          --hostname kali-nx \
+          --privileged \
+          -p 3389:3389 \
+          -p 4000:4000 \
           kalilinux/kali-rolling sleep infinity
 
-    - name: Install & start SSH inside Kali
+    - name: Create user inside container (so .xsession can be placed)
       run: |
-        sudo docker exec kali bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server"
-        sudo docker exec kali bash -c "mkdir -p /var/run/sshd && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config || true"
-        # ensure root login allowed (optional)
-        sudo docker exec kali bash -c "sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config || true"
-        # start sshd in background
-        sudo docker exec -d kali bash -c "/usr/sbin/sshd -D"
+        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
+        sudo docker exec kali bash -c "
+          useradd -m -s /bin/bash kaliuser || true &&
+          echo 'kaliuser:${PASS}' | chpasswd &&
+          usermod -aG sudo kaliuser
+        "
+        echo "RDP_USER=kaliuser" >> $GITHUB_ENV
+        echo "RDP_PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Create user and set password
+    - name: Install GUI, XRDP, NoMachine and networking tools
       run: |
-        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
-        sudo docker exec kali bash -c "useradd -m -s /bin/bash kaliuser || true && echo 'kaliuser:${PASS}' | chpasswd"
-        echo "SSH_USER=kaliuser" >> $GITHUB_ENV
-        echo "SSH_PASS=$PASS" >> $GITHUB_ENV
+        sudo docker exec kali bash -c "
+          apt-get update &&
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies xorgxrdp xrdp dbus-x11 wget curl nano sudo xserver-xorg-core \
+            iptables nftables inetutils-ping net-tools ||
+          true
 
-    - name: (Optional) Install common Kali tools (comment out if you don't need them)
+          # set XFCE as default session for root and new user
+          echo 'xfce4-session' > /root/.xsession
+          echo 'xfce4-session' > /home/kaliuser/.xsession
+          chown kaliuser:kaliuser /home/kaliuser/.xsession
+
+          # install NoMachine .deb
+          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O /tmp/nomachine.deb &&
+          dpkg -i /tmp/nomachine.deb || apt-get -y -f install
+        "
+
+    - name: Start dbus, xrdp, nomachine inside container
       run: |
-        sudo docker exec kali bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nmap netcat-traditional gobuster || true"
+        sudo docker exec -d kali bash -c "rm -f /var/run/dbus/pid || true; /usr/bin/dbus-daemon --system --fork || true"
+        sudo docker exec -d kali bash -c "mkdir -p /var/run/xrdp; /usr/sbin/xrdp-sesman || true; /usr/sbin/xrdp || true"
+        sudo docker exec -d kali bash -c "/usr/NX/bin/nxserver --startup || true"
+        # wait then check listeners
+        sleep 3
+        sudo docker exec kali ss -tulpen | grep -E '3389|4000' || true
 
-    - name: Show connection info
+    - name: Disable firewall inside container (flush nftables/iptables)
+      run: |
+        sudo docker exec kali bash -c "
+          apt-get install -y nftables iptables || true
+          nft flush ruleset || true
+          iptables -F || true
+        "
+
+    - name: Show Access Info
       run: |
         echo ""
         echo "===================================="
-        echo " Kali (container) SSH access details"
-        echo "------------------------------------"
-        echo "Tailscale IP: $TAILSCALE_IP"
-        echo "Host port:    2222  (mapped to container:22)"
-        echo "User:         $SSH_USER"
-        echo "Password:     $SSH_PASS"
+        echo "       Kali Remote Access"
+        echo "===================================="
+        echo "Tailscale IP : $TAILSCALE_IP"
         echo ""
-        echo "SSH command:"
-        echo "  ssh -o StrictHostKeyChecking=no -p 2222 $SSH_USER@$TAILSCALE_IP"
+        echo "RDP          : $TAILSCALE_IP:3389"
+        echo "NoMachine    : $TAILSCALE_IP:4000"
+        echo ""
+        echo "User         : $RDP_USER"
+        echo "Password     : $RDP_PASS"
         echo "===================================="
         echo ""
 
-    - name: Keep Alive (keep the job running)
+    - name: Debug: show xrdp / NoMachine logs (if connection fails)
       run: |
-        while true; do
-          echo "[$(date)] Kali container active..."
-          sleep 300
-        done
+        echo '---- xrdp logs ----'
+        sudo docker exec kali bash -c "test -f /var/log/xrdp.log && tail -n 200 /var/log/xrdp.log || true"
+        sudo docker exec kali bash -c "test -f /var/log/xrdp-sesman.log && tail -n 200 /var/log/xrdp-sesman.log || true"
+        echo '---- NoMachine logs ----'
+        sudo docker exec kali bash -c "test -d /usr/NX/var/log && tail -n 200 /usr/NX/var/log/* || true"
+
+    - name: Keep Alive
+      run: while true; do sleep 300; done
