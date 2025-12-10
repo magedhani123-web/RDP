@@ -1,4 +1,5 @@
 name: Kali-RDP-NoMachine-Tailscale
+
 on:
   workflow_dispatch:
 
@@ -8,32 +9,59 @@ jobs:
     timeout-minutes: 3600
 
     steps:
+
+    # -----------------------------------------------------
+    # 1) تثبيت Docker
+    # -----------------------------------------------------
     - name: Install Docker
       run: |
         docker --version || (curl -fsSL https://get.docker.com | sh && sudo systemctl start docker)
 
-    - name: Install Tailscale (host)
+    # -----------------------------------------------------
+    # 2) قتل أي عملية Tailscale قديمة
+    # -----------------------------------------------------
+    - name: Kill old Tailscale
+      run: |
+        sudo pkill tailscaled || true
+        sudo pkill tailscale || true
+
+    # -----------------------------------------------------
+    # 3) تثبيت tailscale داخل الـ runner
+    # -----------------------------------------------------
+    - name: Install Tailscale
       run: |
         sudo apt-get update
         sudo apt-get install -y curl gnupg
         curl -fsSL https://tailscale.com/install.sh | sudo sh
 
-    - name: Start tailscaled + Login
+    # -----------------------------------------------------
+    # 4) تشغيل tailscaled + تسجيل الدخول
+    # -----------------------------------------------------
+    - name: Start Tailscale + Login
       env:
         TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
         sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &
-        sleep 3
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-nx-${GITHUB_RUN_ID}
+        sleep 4
+        sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-${GITHUB_RUN_ID}
         echo "TAILSCALE_IP=$(sudo tailscale ip -4)" >> $GITHUB_ENV
 
+    # -----------------------------------------------------
+    # 5) سحب صورة Kali
+    # -----------------------------------------------------
     - name: Pull Kali Docker Image
       run: sudo docker pull kalilinux/kali-rolling
 
+    # -----------------------------------------------------
+    # 6) حذف الكونتينر القديم
+    # -----------------------------------------------------
     - name: Remove Old Container
       run: sudo docker rm -f kali || true
 
-    - name: Start Kali Container
+    # -----------------------------------------------------
+    # 7) إنشاء الكونتينر الخاص بـ Kali
+    # -----------------------------------------------------
+    - name: Create Kali Container
       run: |
         sudo docker run -d --name kali \
           --hostname kali-nx \
@@ -42,7 +70,10 @@ jobs:
           -p 4000:4000 \
           kalilinux/kali-rolling sleep infinity
 
-    - name: Create User
+    # -----------------------------------------------------
+    # 8) إنشاء مستخدم جديد
+    # -----------------------------------------------------
+    - name: Create kaliuser inside container
       run: |
         PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
         sudo docker exec kali bash -c "
@@ -53,54 +84,81 @@ jobs:
         echo "RDP_USER=kaliuser" >> $GITHUB_ENV
         echo "RDP_PASS=$PASS" >> $GITHUB_ENV
 
+    # -----------------------------------------------------
+    # 9) تثبيت XFCE + RDP + NoMachine
+    # -----------------------------------------------------
     - name: Install GUI + XRDP + NoMachine
       run: |
         sudo docker exec kali bash -c "
           apt-get update &&
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies xorg xserver-xorg-core xserver-xorg-video-all xfonts-base \
-            xrdp dbus-x11 inetutils-ping net-tools iptables nftables curl wget nano sudo
+            xfce4 xfce4-goodies xorgxrdp xrdp dbus-x11 xserver-xorg-core \
+            wget curl nano sudo inetutils-ping net-tools iptables nftables ||
+          true
 
-          # xfce session
-          echo 'startxfce4' > /root/.xsession
-          echo 'startxfce4' > /home/kaliuser/.xsession
+          echo 'xfce4-session' > /root/.xsession
+          echo 'xfce4-session' > /home/kaliuser/.xsession
           chown kaliuser:kaliuser /home/kaliuser/.xsession
 
-          # install NoMachine
-          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O /tmp/nomachine.deb
-          dpkg -i /tmp/nomachine.deb || apt-get -f install -y
+          # تثبيت NoMachine
+          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O /tmp/nomachine.deb &&
+          dpkg -i /tmp/nomachine.deb || apt-get -y -f install
         "
 
-    - name: Start Services (without systemd)
+    # -----------------------------------------------------
+    # 10) تشغيل الخدمات داخل الكونتينر
+    # -----------------------------------------------------
+    - name: Start Services
       run: |
-        sudo docker exec -d kali bash -c "dbus-daemon --system --fork"
-        sudo docker exec -d kali bash -c "/usr/sbin/xrdp-sesman"
-        sudo docker exec -d kali bash -c "/usr/sbin/xrdp"
-        sudo docker exec -d kali bash -c "/usr/NX/bin/nxserver --startup"
+        sudo docker exec -d kali bash -c "rm -f /var/run/dbus/pid || true; /usr/bin/dbus-daemon --system --fork || true"
+        sudo docker exec -d kali bash -c "mkdir -p /var/run/xrdp; /usr/sbin/xrdp-sesman || true; /usr/sbin/xrdp || true"
+        sudo docker exec -d kali bash -c "/usr/NX/bin/nxserver --startup || true"
+        sleep 4
+        sudo docker exec kali ss -tulpen | grep -E '3389|4000' || true
 
+    # -----------------------------------------------------
+    # 11) تعطيل الجدار الناري داخل الكونتينر
+    # -----------------------------------------------------
     - name: Disable Firewall
       run: |
         sudo docker exec kali bash -c "
-          iptables -P INPUT ACCEPT
-          iptables -P OUTPUT ACCEPT
-          iptables -P FORWARD ACCEPT
-          iptables -F || true
+          apt-get install -y nftables iptables || true
           nft flush ruleset || true
+          iptables -F || true
         "
 
+    # -----------------------------------------------------
+    # 12) عرض بيانات الوصول
+    # -----------------------------------------------------
     - name: Show Access Info
       run: |
-        echo " "
+        echo ""
         echo "===================================="
-        echo "      Kali RDP / NoMachine Access"
+        echo "       Kali Remote Access"
         echo "===================================="
         echo "Tailscale IP : $TAILSCALE_IP"
-        echo "User         : $RDP_USER"
-        echo "Password     : $RDP_PASS"
+        echo ""
         echo "RDP          : $TAILSCALE_IP:3389"
         echo "NoMachine    : $TAILSCALE_IP:4000"
+        echo ""
+        echo "User         : $RDP_USER"
+        echo "Password     : $RDP_PASS"
         echo "===================================="
-        echo " "
+        echo ""
 
+    # -----------------------------------------------------
+    # 13) Debug logs
+    # -----------------------------------------------------
+    - name: Debug Logs
+      run: |
+        echo '---- xrdp logs ----'
+        sudo docker exec kali bash -c "tail -n 200 /var/log/xrdp.log || true"
+        sudo docker exec kali bash -c "tail -n 200 /var/log/xrdp-sesman.log || true"
+        echo '---- NoMachine logs ----'
+        sudo docker exec kali bash -c "tail -n 200 /usr/NX/var/log/* || true"
+
+    # -----------------------------------------------------
+    # 14) Keep session alive
+    # -----------------------------------------------------
     - name: Keep Alive
       run: while true; do sleep 300; done
