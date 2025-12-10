@@ -10,17 +10,13 @@ jobs:
 
     steps:
 
-    # -----------------------------------------------------
-    # 0) عرض بيئة runner (اختياري)
-    # -----------------------------------------------------
+    # 0) معلومات runner
     - name: Runner info
       run: |
         uname -a
         lsb_release -a || true
 
-    # -----------------------------------------------------
     # 1) تثبيت Docker
-    # -----------------------------------------------------
     - name: Install Docker
       run: |
         if ! command -v docker >/dev/null 2>&1; then
@@ -30,26 +26,20 @@ jobs:
           docker --version
         fi
 
-    # -----------------------------------------------------
-    # 2) قتل أي عملية Tailscale قديمة
-    # -----------------------------------------------------
+    # 2) قتل أي Tailscale قديم
     - name: Kill old Tailscale
       run: |
         sudo pkill tailscaled || true
         sudo pkill tailscale || true
 
-    # -----------------------------------------------------
     # 3) تثبيت Tailscale
-    # -----------------------------------------------------
     - name: Install Tailscale
       run: |
         sudo apt-get update -y
         sudo apt-get install -y curl gnupg
         curl -fsSL https://tailscale.com/install.sh | sudo sh
 
-    # -----------------------------------------------------
-    # 4) تشغيل tailscaled + تسجيل الدخول
-    # -----------------------------------------------------
+    # 4) تشغيل tailscaled والاتصال
     - name: Start tailscaled and tailscale up
       env:
         TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
@@ -62,37 +52,28 @@ jobs:
         sudo tailscale up --authkey="${TAILSCALE_AUTH_KEY}" --hostname="kali-${GITHUB_RUN_ID}" || true
         TAILSCALE_IP="$(sudo tailscale ip -4 || true)"
         echo "TAILSCALE_IP=${TAILSCALE_IP}" >> $GITHUB_ENV
-        echo "tailscale status:"
         sudo tailscale status || true
 
-    # -----------------------------------------------------
     # 5) سحب صورة Kali
-    # -----------------------------------------------------
     - name: Pull Kali Docker Image
       run: sudo docker pull kalilinux/kali-rolling
 
-    # -----------------------------------------------------
-    # 6) حذف الكونتينر القديم إن وُجد
-    # -----------------------------------------------------
+    # 6) حذف الكونتينر القديم
     - name: Remove Old Container
       run: sudo docker rm -f kali || true
 
-    # -----------------------------------------------------
-    # 7) إنشاء الكونتينر الخاص بـ Kali
-    # -----------------------------------------------------
+    # 7) إنشاء الكونتينر
     - name: Create Kali Container
       run: |
         sudo docker run -d --name kali \
-          --hostname kali-nx \
+          --hostname kali-gnome \
           --privileged \
           --cap-add=NET_ADMIN \
           -p 3389:3389 \
           -p 4000:4000 \
           kalilinux/kali-rolling sleep infinity
 
-    # -----------------------------------------------------
-    # 8) إنشاء مستخدم جديد داخل الكونتينر
-    # -----------------------------------------------------
+    # 8) إنشاء المستخدم kaliuser
     - name: Create kaliuser inside container
       run: |
         PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
@@ -100,22 +81,20 @@ jobs:
         echo "RDP_USER=kaliuser" >> $GITHUB_ENV
         echo "RDP_PASS=${PASS}" >> $GITHUB_ENV
 
-    # -----------------------------------------------------
-    # 9) تثبيت واجهة XFCE رسمية + XRDP + NoMachine
-    # -----------------------------------------------------
-    - name: Install GUI + XRDP + NoMachine
+    # 9) تثبيت GNOME + XRDP + NoMachine
+    - name: Install GNOME + XRDP + NoMachine
       run: |
         sudo docker exec kali bash -lc "
           set -e
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y --no-install-recommends \
-            xfce4 xfce4-panel xfce4-session xfce4-terminal \
+            gnome-core gdm3 gnome-terminal \
             xorgxrdp xrdp dbus-x11 xserver-xorg-core \
             wget curl nano sudo inetutils-ping net-tools iptables nftables ca-certificates gnupg || true
-          echo 'xfce4-session' > /root/.xsession
+          echo 'gnome-session' > /root/.xsession
           mkdir -p /home/kaliuser
-          echo 'xfce4-session' > /home/kaliuser/.xsession
+          echo 'gnome-session' > /home/kaliuser/.xsession
           chown kaliuser:kaliuser /home/kaliuser/.xsession
 
           # تثبيت NoMachine
@@ -126,9 +105,7 @@ jobs:
           fi
         "
 
-    # -----------------------------------------------------
-    # 10) تشغيل الخدمات داخل الكونتينر
-    # -----------------------------------------------------
+    # 10) تشغيل الخدمات
     - name: Start Services
       run: |
         sudo docker exec -d kali bash -lc "rm -f /var/run/dbus/pid || true; /usr/bin/dbus-daemon --system --fork || true"
@@ -138,9 +115,7 @@ jobs:
         sleep 4
         sudo docker exec kali ss -tulpen | grep -E '3389|4000' || true
 
-    # -----------------------------------------------------
-    # 11) تعطيل الجدار الناري داخل الكونتينر
-    # -----------------------------------------------------
+    # 11) تعطيل الجدار الناري
     - name: Disable Firewall inside container
       run: |
         sudo docker exec kali bash -lc "
@@ -149,27 +124,21 @@ jobs:
           iptables -F || true
         "
 
-    # -----------------------------------------------------
-    # 12) طباعة بيانات الوصول
-    # -----------------------------------------------------
-    - name: Show Access Info & Diagnostics
+    # 12) عرض بيانات الوصول
+    - name: Show Access Info
       run: |
         echo ""
         echo "===================================="
         echo "       Kali Remote Access"
         echo "===================================="
         echo "Tailscale IP : ${TAILSCALE_IP:-<not-found>}"
-        echo ""
         echo "RDP          : ${TAILSCALE_IP:-<not-found>}:3389"
         echo "NoMachine    : ${TAILSCALE_IP:-<not-found>}:4000"
-        echo ""
         echo "User         : $RDP_USER"
         echo "Password     : $RDP_PASS"
         echo "===================================="
 
-    # -----------------------------------------------------
     # 13) Debug logs
-    # -----------------------------------------------------
     - name: Debug Logs
       run: |
         echo '---- xrdp logs ----'
@@ -178,9 +147,7 @@ jobs:
         echo '---- NoMachine logs ----'
         sudo docker exec kali bash -c "ls -la /usr/NX/var/log || true; tail -n 200 /usr/NX/var/log/* 2>/dev/null || true"
 
-    # -----------------------------------------------------
-    # 14) إبقاء الجلسة حية (اختياري)
-    # -----------------------------------------------------
+    # 14) إبقاء الجلسة حية
     - name: Keep Alive
       run: |
         while true; do sleep 300; done
