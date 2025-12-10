@@ -1,4 +1,4 @@
-name: Kali-RDP
+name: Kali-RDP-NoMachine-Tailscale
 on:
   workflow_dispatch:
 
@@ -33,7 +33,7 @@ jobs:
     - name: Remove Old Container
       run: sudo docker rm -f kali || true
 
-    - name: Create Kali container (privileged) + expose ports
+    - name: Start Kali Container
       run: |
         sudo docker run -d --name kali \
           --hostname kali-nx \
@@ -42,7 +42,7 @@ jobs:
           -p 4000:4000 \
           kalilinux/kali-rolling sleep infinity
 
-    - name: Create user inside container (so .xsession can be placed)
+    - name: Create User
       run: |
         PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
         sudo docker exec kali bash -c "
@@ -53,65 +53,54 @@ jobs:
         echo "RDP_USER=kaliuser" >> $GITHUB_ENV
         echo "RDP_PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Install GUI, XRDP, NoMachine and networking tools
+    - name: Install GUI + XRDP + NoMachine
       run: |
         sudo docker exec kali bash -c "
           apt-get update &&
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies xorgxrdp xrdp dbus-x11 wget curl nano sudo xserver-xorg-core \
-            iptables nftables inetutils-ping net-tools ||
-          true
+            xfce4 xfce4-goodies xorg xserver-xorg-core xserver-xorg-video-all xfonts-base \
+            xrdp dbus-x11 inetutils-ping net-tools iptables nftables curl wget nano sudo
 
-          # set XFCE as default session for root and new user
-          echo 'xfce4-session' > /root/.xsession
-          echo 'xfce4-session' > /home/kaliuser/.xsession
+          # xfce session
+          echo 'startxfce4' > /root/.xsession
+          echo 'startxfce4' > /home/kaliuser/.xsession
           chown kaliuser:kaliuser /home/kaliuser/.xsession
 
-          # install NoMachine .deb
-          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O /tmp/nomachine.deb &&
-          dpkg -i /tmp/nomachine.deb || apt-get -y -f install
+          # install NoMachine
+          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O /tmp/nomachine.deb
+          dpkg -i /tmp/nomachine.deb || apt-get -f install -y
         "
 
-    - name: Start dbus, xrdp, nomachine inside container
+    - name: Start Services (without systemd)
       run: |
-        sudo docker exec -d kali bash -c "rm -f /var/run/dbus/pid || true; /usr/bin/dbus-daemon --system --fork || true"
-        sudo docker exec -d kali bash -c "mkdir -p /var/run/xrdp; /usr/sbin/xrdp-sesman || true; /usr/sbin/xrdp || true"
-        sudo docker exec -d kali bash -c "/usr/NX/bin/nxserver --startup || true"
-        # wait then check listeners
-        sleep 3
-        sudo docker exec kali ss -tulpen | grep -E '3389|4000' || true
+        sudo docker exec -d kali bash -c "dbus-daemon --system --fork"
+        sudo docker exec -d kali bash -c "/usr/sbin/xrdp-sesman"
+        sudo docker exec -d kali bash -c "/usr/sbin/xrdp"
+        sudo docker exec -d kali bash -c "/usr/NX/bin/nxserver --startup"
 
-    - name: Disable firewall inside container (flush nftables/iptables)
+    - name: Disable Firewall
       run: |
         sudo docker exec kali bash -c "
-          apt-get install -y nftables iptables || true
-          nft flush ruleset || true
+          iptables -P INPUT ACCEPT
+          iptables -P OUTPUT ACCEPT
+          iptables -P FORWARD ACCEPT
           iptables -F || true
+          nft flush ruleset || true
         "
 
     - name: Show Access Info
       run: |
-        echo ""
+        echo " "
         echo "===================================="
-        echo "       Kali Remote Access"
+        echo "      Kali RDP / NoMachine Access"
         echo "===================================="
         echo "Tailscale IP : $TAILSCALE_IP"
-        echo ""
-        echo "RDP          : $TAILSCALE_IP:3389"
-        echo "NoMachine    : $TAILSCALE_IP:4000"
-        echo ""
         echo "User         : $RDP_USER"
         echo "Password     : $RDP_PASS"
+        echo "RDP          : $TAILSCALE_IP:3389"
+        echo "NoMachine    : $TAILSCALE_IP:4000"
         echo "===================================="
-        echo ""
-
-    - name: Debug: show xrdp / NoMachine logs (if connection fails)
-      run: |
-        echo '---- xrdp logs ----'
-        sudo docker exec kali bash -c "test -f /var/log/xrdp.log && tail -n 200 /var/log/xrdp.log || true"
-        sudo docker exec kali bash -c "test -f /var/log/xrdp-sesman.log && tail -n 200 /var/log/xrdp-sesman.log || true"
-        echo '---- NoMachine logs ----'
-        sudo docker exec kali bash -c "test -d /usr/NX/var/log && tail -n 200 /usr/NX/var/log/* || true"
+        echo " "
 
     - name: Keep Alive
       run: while true; do sleep 300; done
