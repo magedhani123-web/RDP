@@ -1,4 +1,4 @@
-name: Kali Linux Desktop + Tailscale
+name: Kali Linux Docker GUI + Tailscale
 
 on:
   workflow_dispatch:
@@ -8,66 +8,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install Kali Desktop (XFCE)
+      - name: Install Docker
         run: |
           sudo apt update
-          sudo apt install -y ca-certificates curl gnupg
-          
-          # إضافة مخازن كالي
-          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free" | sudo tee /etc/apt/sources.list
-          sudo curl -fsSL https://archive.kali.org/archive-key.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/kali.gpg
-          
-          sudo apt update
-          
-          # تثبيت واجهة كالي الرسمية
-          sudo apt install -y kali-desktop-xfce
-          sudo apt install -y xrdp
-          
-          # VNC
-          sudo apt install -y x11vnc xvfb
-          mkdir -p ~/.vnc
-          x11vnc -storepasswd "${{ secrets.VNC_PASS }}" ~/.vnc/passwd
+          sudo apt install -y docker.io
+          sudo systemctl start docker
 
-      - name: Start Virtual Display (Xvfb)
+      - name: Run Kali Linux Desktop (Docker)
         run: |
-          export DISPLAY=:1
-          Xvfb :1 -screen 0 1920x1080x24 &
-          sleep 3
-
-      - name: Start Kali XFCE session
-        run: |
-          export DISPLAY=:1
-          startxfce4 &
-          sleep 5
-
-      - name: Start VNC server
-        run: |
-          export DISPLAY=:1
-          x11vnc -display :1 -usepw -forever -shared -rfbport 5901 &
-
-      - name: Start noVNC server
-        run: |
-          sudo apt install -y novnc websockify
-          websockify --web=/usr/share/novnc/ 6080 localhost:5901 &
+          docker run -d \
+            --name kali \
+            -p 5901:5901 \
+            -p 6080:6080 \
+            kalilinux/kali-rolling \
+            bash -c "
+              apt update &&
+              apt install -y xfce4 tightvncserver novnc websockify &&
+              mkdir -p ~/.vnc &&
+              echo '${{ secrets.VNC_PASS }}' | vncpasswd -f > ~/.vnc/passwd &&
+              chmod 600 ~/.vnc/passwd &&
+              vncserver :1 &&
+              websockify --web=/usr/share/novnc/ 6080 localhost:5901
+            "
 
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up \
             --authkey="${{ secrets.TS_AUTH_KEY }}" \
-            --hostname="Kali-Linux" \
+            --hostname="Kali-Docker" \
             --accept-routes \
             --accept-dns=false
 
-      - name: Display Tailscale IP + instructions
+      - name: Show Access Info
         run: |
-          echo "========================================"
-          echo "✔ Kali Linux Desktop is running!"
-          echo "✔ Tailscale Device:"
+          echo "======================================"
+          echo "✔ Kali Linux Desktop (Docker) is LIVE!"
+          echo "✔ Tailscale IP:"
           tailscale ip -4
-          echo "----------------------------------------"
-          echo "VNC Access: 100.x.x.x:5901"
-          echo "noVNC Web:  http://100.x.x.x:6080"
+          echo "--------------------------------------"
+          echo "VNC:   100.x.x.x:5901"
+          echo "noVNC: http://100.x.x.x:6080"
           echo "Password: ${{ secrets.VNC_PASS }}"
-          echo "========================================"
+          echo "======================================"
           sleep 999999
