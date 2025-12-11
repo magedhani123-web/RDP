@@ -1,54 +1,97 @@
-name: Kali Linux Docker GUI + Tailscale
+name: Ubuntu Desktop (Docker) + Tailscale + VNC/noVNC
 
 on:
   workflow_dispatch:
 
 jobs:
-  kali:
+  desktop:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # يمكنك تغييره إذا أردت
 
     steps:
-      - name: Install Docker
-        run: |
-          sudo apt update
-          sudo apt install -y docker.io
-          sudo systemctl start docker
+      - name: Checkout (no-op, keeps logs واضحة)
+        uses: actions/checkout@v4
 
-      - name: Run Kali Linux Desktop (Docker)
+      - name: Fix containerd conflict & add Docker repo
         run: |
-          docker run -d \
-            --name kali \
-            -p 5901:5901 \
-            -p 6080:6080 \
-            kalilinux/kali-rolling \
-            bash -c "
-              apt update &&
-              apt install -y xfce4 tightvncserver novnc websockify &&
-              mkdir -p ~/.vnc &&
-              echo '${{ secrets.VNC_PASS }}' | vncpasswd -f > ~/.vnc/passwd &&
-              chmod 600 ~/.vnc/passwd &&
-              vncserver :1 &&
-              websockify --web=/usr/share/novnc/ 6080 localhost:5901
-            "
+          sudo apt-get update -y
+          # remove possible conflicting containerd packages
+          sudo apt-get remove -y containerd containerd.io || true
+          sudo apt-get update -y
+          sudo apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo \
+            "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+            $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update -y
 
-      - name: Install Tailscale
+      - name: Install Docker (CE) and helpers
         run: |
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo systemctl enable --now docker
+          docker --version
+          sudo usermod -aG docker $USER || true
+
+      - name: Pull Ubuntu Desktop image (dorowu/ubuntu-desktop-lxde-vnc)
+        run: |
+          docker pull dorowu/ubuntu-desktop-lxde-vnc:latest
+
+      - name: Run Ubuntu Desktop container (VNC + noVNC)
+        env:
+          VNC_PASS: ${{ secrets.VNC_PASS }}
+        run: |
+          # stop & remove any previous container with same name
+          docker rm -f ubuntu_gui || true
+          # run container, map host ports 5901 (VNC) and 6080 (noVNC)
+          docker run -d --name ubuntu_gui \
+            --shm-size=1g \
+            -e VNC_PASSWORD="${VNC_PASS}" \
+            -p 5901:5900 -p 6080:6080 \
+            dorowu/ubuntu-desktop-lxde-vnc:latest
+
+      - name: Wait for container to be ready (brief)
+        run: |
+          echo "Waiting up to 30s for container services..."
+          for i in {1..15}; do
+            docker ps --filter "name=ubuntu_gui" --format "{{.Status}}"
+            # check if noVNC web files exist inside container
+            docker exec ubuntu_gui bash -lc "test -d /usr/share/novnc || test -d /usr/share/novnc || exit 1" && break || true
+            sleep 2
+          done
+          docker logs --tail 50 ubuntu_gui || true
+
+      - name: Install Tailscale on host & login
+        env:
+          TS_AUTH_KEY: ${{ secrets.TS_AUTH_KEY }}
+        run: |
+          # install tailscale on the runner (host) and register device
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up \
-            --authkey="${{ secrets.TS_AUTH_KEY }}" \
-            --hostname="Kali-Docker" \
-            --accept-routes \
-            --accept-dns=false
+          sudo tailscale up --authkey="${TS_AUTH_KEY}" --hostname="GitHub-Desktop-Docker" --accept-routes --accept-dns=false || true
+          # sometimes up may fail immediately; retry once
+          sleep 2
+          sudo tailscale status || true
 
-      - name: Show Access Info
+      - name: Get Tailscale IP and show connection info
+        id: show
         run: |
-          echo "======================================"
-          echo "✔ Kali Linux Desktop (Docker) is LIVE!"
-          echo "✔ Tailscale IP:"
-          tailscale ip -4
-          echo "--------------------------------------"
-          echo "VNC:   100.x.x.x:5901"
-          echo "noVNC: http://100.x.x.x:6080"
-          echo "Password: ${{ secrets.VNC_PASS }}"
-          echo "======================================"
-          sleep 999999
+          TS_IP=$(tailscale ip -4 || echo "")
+          echo "TS_IP=$TS_IP" >> $GITHUB_ENV
+          echo "=============================="
+          echo "Tailscale IP: $TS_IP"
+          echo ""
+          echo "noVNC (open in browser): http://${TS_IP}:6080  (may take a few seconds)"
+          echo "VNC (use client): ${TS_IP}:5901"
+          echo "VNC password: ******** (the VNC_PASS secret you provided)"
+          echo ""
+          echo "Container name: ubuntu_gui"
+          echo ""
+          echo "If noVNC doesn't open, check container logs with: docker logs ubuntu_gui"
+          echo "=============================="
+          # print small portion of container logs for debugging
+          docker logs --tail 80 ubuntu_gui || true
+
+      - name: Keep job alive (interactive session)
+        run: |
+          echo "Session running. This step will keep the job alive until timeout or manual cancel."
+          # Sleep loop to keep runner alive (exit when workflow cancelled)
+          while true; do sleep 300; done
