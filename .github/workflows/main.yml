@@ -12,7 +12,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update & install Docker
+      - name: Fix containerd conflict & install Docker
         run: |
           sudo apt-get update -y
           sudo apt-get remove -y containerd containerd.io || true
@@ -22,8 +22,9 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/docker.list
           sudo apt-get update -y
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          sudo systemctl enable --now docker
 
-      - name: Pull Ubuntu desktop base
+      - name: Pull Ubuntu base image
         run: |
           docker pull ubuntu:22.04
 
@@ -38,9 +39,13 @@ jobs:
       - name: Install Ubuntu Desktop + NoMachine inside container
         run: |
           docker exec ubuntu_gui bash -c "apt-get update"
-          docker exec ubuntu_gui bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-desktop"
-          docker exec ubuntu_gui bash -c "wget https://downloads.nomachine.com/download/8.12/Linux/nomachine_8.12.1_1_amd64.deb"
-          docker exec ubuntu_gui bash -c "apt install -y ./nomachine_*.deb"
+          docker exec ubuntu_gui bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-desktop wget"
+
+          # تحميل أحدث إصدار رسمي من NoMachine
+          docker exec ubuntu_gui bash -c "wget https://download.nomachine.com/download/latest/Linux/nomachine_amd64.deb -O /tmp/nomachine.deb"
+
+          # تثبيت NoMachine بطريقة صحيحة
+          docker exec ubuntu_gui bash -c "apt install -y /tmp/nomachine.deb || dpkg -i /tmp/nomachine.deb || apt --fix-broken install -y"
 
       - name: Install Tailscale on host
         env:
@@ -55,11 +60,11 @@ jobs:
           TS_IP=$(tailscale ip -4)
           echo "============================"
           echo "🎉 NoMachine جاهز!"
-          echo "اتصل من جهازك:"
+          echo "اتصل من جهازك عبر NoMachine NX:"
           echo "nx://$TS_IP"
           echo ""
           echo "اسم المستخدم: root"
-          echo "كلمة المرور: (قم بتعيينها داخل الجلسة)"
+          echo "كلمة المرور: (قم بتعيينها داخل الجلسة بعد الدخول)"
           echo "============================"
 
       - name: Keep session alive
