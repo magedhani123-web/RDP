@@ -1,4 +1,4 @@
-name: Ubuntu Desktop (Docker) + Tailscale + VNC/noVNC
+name: Ubuntu Desktop + NoMachine + Tailscale
 
 on:
   workflow_dispatch:
@@ -6,92 +6,62 @@ on:
 jobs:
   desktop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # يمكنك تغييره إذا أردت
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout (no-op, keeps logs واضحة)
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fix containerd conflict & add Docker repo
+      - name: Update & install Docker
         run: |
           sudo apt-get update -y
-          # remove possible conflicting containerd packages
           sudo apt-get remove -y containerd containerd.io || true
-          sudo apt-get update -y
           sudo apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo \
-            "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-            $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list
           sudo apt-get update -y
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-      - name: Install Docker (CE) and helpers
+      - name: Pull Ubuntu desktop base
         run: |
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-          sudo systemctl enable --now docker
-          docker --version
-          sudo usermod -aG docker $USER || true
+          docker pull ubuntu:22.04
 
-      - name: Pull Ubuntu Desktop image (dorowu/ubuntu-desktop-lxde-vnc)
+      - name: Run container with systemd support
         run: |
-          docker pull dorowu/ubuntu-desktop-lxde-vnc:latest
-
-      - name: Run Ubuntu Desktop container (VNC + noVNC)
-        env:
-          VNC_PASS: ${{ secrets.VNC_PASS }}
-        run: |
-          # stop & remove any previous container with same name
           docker rm -f ubuntu_gui || true
-          # run container, map host ports 5901 (VNC) and 6080 (noVNC)
-          docker run -d --name ubuntu_gui \
-            --shm-size=1g \
-            -e VNC_PASSWORD="${VNC_PASS}" \
-            -p 5901:5900 -p 6080:6080 \
-            dorowu/ubuntu-desktop-lxde-vnc:latest
+          docker run -d --name ubuntu_gui --privileged \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+            -p 4000:4000 \
+            ubuntu:22.04 sleep infinity
 
-      - name: Wait for container to be ready (brief)
+      - name: Install Ubuntu Desktop + NoMachine inside container
         run: |
-          echo "Waiting up to 30s for container services..."
-          for i in {1..15}; do
-            docker ps --filter "name=ubuntu_gui" --format "{{.Status}}"
-            # check if noVNC web files exist inside container
-            docker exec ubuntu_gui bash -lc "test -d /usr/share/novnc || test -d /usr/share/novnc || exit 1" && break || true
-            sleep 2
-          done
-          docker logs --tail 50 ubuntu_gui || true
+          docker exec ubuntu_gui bash -c "apt-get update"
+          docker exec ubuntu_gui bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-desktop"
+          docker exec ubuntu_gui bash -c "wget https://downloads.nomachine.com/download/8.12/Linux/nomachine_8.12.1_1_amd64.deb"
+          docker exec ubuntu_gui bash -c "apt install -y ./nomachine_*.deb"
 
-      - name: Install Tailscale on host & login
+      - name: Install Tailscale on host
         env:
           TS_AUTH_KEY: ${{ secrets.TS_AUTH_KEY }}
         run: |
-          # install tailscale on the runner (host) and register device
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey="${TS_AUTH_KEY}" --hostname="GitHub-Desktop-Docker" --accept-routes --accept-dns=false || true
-          # sometimes up may fail immediately; retry once
-          sleep 2
-          sudo tailscale status || true
+          sudo tailscale up --authkey="${TS_AUTH_KEY}" --hostname=GitHub-NoMachine --accept-routes --accept-dns=false
+          tailscale ip -4
 
-      - name: Get Tailscale IP and show connection info
-        id: show
+      - name: Print connection info
         run: |
-          TS_IP=$(tailscale ip -4 || echo "")
-          echo "TS_IP=$TS_IP" >> $GITHUB_ENV
-          echo "=============================="
-          echo "Tailscale IP: $TS_IP"
+          TS_IP=$(tailscale ip -4)
+          echo "============================"
+          echo "🎉 NoMachine جاهز!"
+          echo "اتصل من جهازك:"
+          echo "nx://$TS_IP"
           echo ""
-          echo "noVNC (open in browser): http://${TS_IP}:6080  (may take a few seconds)"
-          echo "VNC (use client): ${TS_IP}:5901"
-          echo "VNC password: ******** (the VNC_PASS secret you provided)"
-          echo ""
-          echo "Container name: ubuntu_gui"
-          echo ""
-          echo "If noVNC doesn't open, check container logs with: docker logs ubuntu_gui"
-          echo "=============================="
-          # print small portion of container logs for debugging
-          docker logs --tail 80 ubuntu_gui || true
+          echo "اسم المستخدم: root"
+          echo "كلمة المرور: (قم بتعيينها داخل الجلسة)"
+          echo "============================"
 
-      - name: Keep job alive (interactive session)
+      - name: Keep session alive
         run: |
-          echo "Session running. This step will keep the job alive until timeout or manual cancel."
-          # Sleep loop to keep runner alive (exit when workflow cancelled)
           while true; do sleep 300; done
