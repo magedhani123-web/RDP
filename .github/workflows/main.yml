@@ -1,52 +1,41 @@
-name: Windows RDP with Tailscale
+name: Ubuntu Desktop + Tailscale GUI
 
 on:
   workflow_dispatch:
 
 jobs:
-  connect:
-    runs-on: windows-latest
+  gui:
+    runs-on: ubuntu-latest
+
     steps:
-
-      - name: Create RDP User
+      - name: Install XFCE Desktop
         run: |
-          net user ${{ secrets.RDP_USER }} ${{ secrets.RDP_PASS }} /add
-          net localgroup administrators ${{ secrets.RDP_USER }} /add
-          net localgroup "Remote Desktop Users" ${{ secrets.RDP_USER }} /add
+          sudo apt update
+          sudo apt install -y xfce4 xfce4-goodies
+          sudo apt install -y tigervnc-standalone-server
+          sudo apt install -y novnc websockify
+          mkdir -p ~/.vnc
+          echo "${{ secrets.VNC_PASS }}" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
 
-      - name: Enable RDP
+      - name: Create VNC Startup Script
         run: |
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "PortNumber" -Value 3389
+          echo "#!/bin/sh
+          xrdb $HOME/.Xresources
+          startxfce4 &" > ~/.vnc/xstartup
+          chmod +x ~/.vnc/xstartup
+
+      - name: Start VNC + noVNC
+        run: |
+          vncserver :1
+          websockify --web=/usr/share/novnc/ 6080 localhost:5901 &
 
       - name: Install Tailscale
         run: |
-          curl -fsSL https://pkgs.tailscale.com/stable/tailscale-ipn.exe -o tailscale.exe
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="${{ secrets.TS_AUTH_KEY }}" --hostname="Linux-GUI" --accept-routes --accept-dns=false
 
-      - name: Start Tailscale
+      - name: Show Tailscale IP
         run: |
-          .\tailscale.exe up `
-            --authkey "${{ secrets.TS_AUTH_KEY }}" `
-            --hostname "github-rdp-runner" `
-            --accept-routes `
-            --accept-dns=false `
-            --shields-up=false
-
-      - name: Get Tailscale IP
-        id: tsip
-        run: |
-          $ip = .\tailscale.exe ip | Select-Object -Last 1
-          echo "TS_IP=$ip" >> $env:GITHUB_ENV
-          echo "TAILSCALE IP = $ip"
-
-      - name: Show Connection Info
-        run: |
-          Write-Host "========================"
-          Write-Host "✔ جهازك جاهز للاتصال"
-          Write-Host "✔ استخدم برنامج RDP"
-          Write-Host "------------------------"
-          Write-Host "IP: $env:TS_IP"
-          Write-Host "User: ${{ secrets.RDP_USER }}"
-          Write-Host "Password: ${{ secrets.RDP_PASS }}"
-          Write-Host "========================"
+          echo "Tailscale IP:"
+          tailscale ip -4
