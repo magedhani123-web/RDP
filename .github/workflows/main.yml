@@ -1,72 +1,71 @@
-name: Ubuntu Desktop + NoMachine + Tailscale
-
-on:
+name: ubunturdp
+on: 
   workflow_dispatch:
-
+   inputs:
+     auth:
+        description: 'GRDP Authorization Code'
+        required: true
+        default: 'paste your code here'
+  
+defaults:
+  run:
+    shell: bash
 jobs:
-  desktop:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+  build:
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Fix containerd conflict & install Docker
-        run: |
-          sudo apt-get update -y
-          sudo apt-get remove -y containerd containerd.io || true
-          sudo apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-            | sudo tee /etc/apt/sources.list.d/docker.list
-          sudo apt-get update -y
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-          sudo systemctl enable --now docker
-
-      - name: Pull Ubuntu base image
-        run: |
-          docker pull ubuntu:22.04
-
-      - name: Run container with systemd support
-        run: |
-          docker rm -f ubuntu_gui || true
-          docker run -d --name ubuntu_gui --privileged \
-            -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-            -p 4000:4000 \
-            ubuntu:22.04 sleep infinity
-
-      - name: Install Ubuntu Desktop + NoMachine inside container
-        run: |
-          docker exec ubuntu_gui bash -c "apt-get update"
-          docker exec ubuntu_gui bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-desktop wget"
-
-          # تحميل أحدث إصدار رسمي من NoMachine
-          docker exec ubuntu_gui bash -c "wget https://download.nomachine.com/download/latest/Linux/nomachine_amd64.deb -O /tmp/nomachine.deb"
-
-          # تثبيت NoMachine بطريقة صحيحة
-          docker exec ubuntu_gui bash -c "apt install -y /tmp/nomachine.deb || dpkg -i /tmp/nomachine.deb || apt --fix-broken install -y"
-
-      - name: Install Tailscale on host
-        env:
-          TS_AUTH_KEY: ${{ secrets.TS_AUTH_KEY }}
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey="${TS_AUTH_KEY}" --hostname=GitHub-NoMachine --accept-routes --accept-dns=false
-          tailscale ip -4
-
-      - name: Print connection info
-        run: |
-          TS_IP=$(tailscale ip -4)
-          echo "============================"
-          echo "🎉 NoMachine جاهز!"
-          echo "اتصل من جهازك عبر NoMachine NX:"
-          echo "nx://$TS_IP"
-          echo ""
-          echo "اسم المستخدم: root"
-          echo "كلمة المرور: (قم بتعيينها داخل الجلسة بعد الدخول)"
-          echo "============================"
-
-      - name: Keep session alive
-        run: |
-          while true; do sleep 300; done
+    - name: Creating User to Login
+      run: |
+         sudo useradd -m ash && sudo adduser ash sudo && echo 'ash:ash' | sudo chpasswd
+     
+    - name: Installing Desktop Environment (wait for 10 min)
+      run: sudo apt update && sudo apt install expect ubuntu-desktop
+    - name: Installing Google Chrome Headless
+      run: |
+            sudo useradd -m Ubuntu 
+            sudo adduser Ubuntu sudo
+            echo 'Ubuntu:1234' | sudo chpasswd
+            sudo sed -i 's/\/bin\/sh/\/bin\/bash/g' /etc/passwd
+            sudo apt-get update
+            sudo apt-get install xfce4-terminal -y
+            wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+            sudo dpkg --install chrome-remote-desktop_current_amd64.deb
+            sudo apt install --assume-yes --fix-broken
+            sudo DEBIAN_FRONTEND=noninteractive \
+            apt install --assume-yes xfce4 desktop-base
+            sudo bash -c 'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > /etc/chrome-remote-desktop-session'  
+            sudo apt install --assume-yes xscreensaver
+            sudo systemctl disable lightdm.service
+            wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo dpkg --install google-chrome-stable_current_amd64.deb
+            sudo apt install --assume-yes --fix-broken
+            sudo apt update && sudo apt -f install
+            sudo apt install python3-pip -y
+            sudo apt-get install -y xvfb 
+            pip3 install nbformat
+            pip3 install gdown
+            pip3 install pika
+            sudo apt install nautilus nano -y
+            wget -O code.deb https://code.visualstudio.com/sha/download\?build\=stable\&os\=linux-deb-x64
+            sudo dpkg --install code.deb
+            wget https://raw.githubusercontent.com/creationix/nvm/master/install.sh
+            bash install.sh
+            source ~/.profile
+            sudo adduser Ubuntu chrome-remote-desktop
+    - name: generate script
+      run: |
+           touch setup.sh
+           echo "${{ github.event.inputs.auth }}" >> "setup.sh"
+           chmod 777 setup.sh
+    - name: initialize GRDP
+      run: |   
+           expect -c '
+           spawn ./setup.sh
+           expect "Enter a PIN of at least six digits: "
+           send "123456\r"
+           expect "Enter the same PIN again: "
+           send "123456\r"
+           expect eof
+           '
+    - name: SSH tunnel over ngrok
+      uses: joshlarsen/ssh-tunnel-action@v1.2
