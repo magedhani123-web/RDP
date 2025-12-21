@@ -58,14 +58,15 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
         "
 
-    - name: Start Tailscale (Docker way)
+    - name: Start Tailscale (Docker userspace - FIXED)
       env:
         TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
         sudo docker exec kali bash -c "
-          tailscaled --tun=userspace-networking &
-          sleep 5
-          tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-gh
+          pkill tailscaled || true
+          tailscaled --tun=userspace-networking --state=/tmp/tailscale.state &
+          sleep 6
+          tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-gh --accept-routes
           tailscale ip -4
         " | tee ts.log
 
