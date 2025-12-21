@@ -49,7 +49,7 @@ jobs:
 
     - name: Start NoMachine
       run: |
-        sudo docker exec kali /usr/NX/bin/nxserver --start
+        sudo docker exec kali /usr/NX/bin/nxserver --status
 
     - name: Install Tailscale
       run: |
