@@ -32,7 +32,7 @@ jobs:
         sudo docker exec kali bash -c "
           apt update &&
           apt install -y xfce4 xfce4-goodies dbus-x11 wget curl sudo &&
-          wget https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.4_4_amd64.deb &&
+          wget https://web9001.nomachine.com/download/9.3/Linux/nomachine_9.3.7_1_amd64.deb &&
           dpkg -i nomachine_*.deb || apt --fix-broken install -y
         "
 
