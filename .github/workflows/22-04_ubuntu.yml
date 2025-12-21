@@ -1,4 +1,4 @@
-name: Kali-NoMachine
+name: Kali-NoMachine-Fixed
 
 on:
   workflow_dispatch:
@@ -14,12 +14,9 @@ jobs:
         sudo apt update
         docker --version
 
-    - name: Pull Kali Image
+    - name: Pull & Start Kali Container
       run: |
         sudo docker pull kalilinux/kali-rolling
-
-    - name: Start Kali Container
-      run: |
         sudo docker run -d --name kali \
           --hostname kali-runner \
           --cap-add=NET_ADMIN \
@@ -46,42 +43,54 @@ jobs:
         echo "USER=kaliuser" >> $GITHUB_ENV
         echo "PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Start NoMachine & DBUS
+    - name: Start NoMachine & Desktop Services
       run: |
-        sudo docker exec kali bash -c "service dbus start && /usr/NX/bin/nxserver --start"
-        sudo docker exec kali /usr/NX/bin/nxserver --status
+        # تشغيل الخدمات يدوياً لتجاوز غياب systemd
+        sudo docker exec kali bash -c "
+          mkdir -p /var/run/dbus
+          dbus-daemon --system --fork
+          /usr/NX/bin/nxserver --startup
+        "
 
-    - name: Install Tailscale
-      run: |
-        sudo docker exec kali bash -c "curl -fsSL https://tailscale.com/install.sh | sh"
-
-    - name: Start Tailscale (Userspace Mode)
+    - name: Install & Fix Tailscale (No systemd Mode)
       env:
         TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        # تشغيل tailscaled في الخلفية داخل الحاوية
-        sudo docker exec -d kali bash -c "tailscaled --tun=userspace-networking --state=/tmp/tailscale.state"
+        # تثبيت Tailscale
+        sudo docker exec kali bash -c "curl -fsSL https://tailscale.com/install.sh | sh"
+        
+        # إنشاء المجلدات الضرورية
+        sudo docker exec kali mkdir -p /var/run/tailscale /var/lib/tailscale
+        
+        # تشغيل المحرك يدوياً في الخلفية (Userspace Networking)
+        sudo docker exec -d kali bash -c "tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state"
+        
+        # الانتظار للتأكد من تشغيل الخدمة
         sleep 5
-        # تسجيل الدخول
+        
+        # ربط الجهاز بالشبكة
         sudo docker exec kali tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-gh
-        # جلب عنوان IP
+        
+        # جلب الـ IP
         TSIP=$(sudo docker exec kali tailscale ip -4)
         echo "TSIP=$TSIP" >> $GITHUB_ENV
 
-    - name: Connection Information
+    - name: Display Connection Credentials
       run: |
         echo "------------------------------------------"
-        echo "Kali Linux is ready!"
-        echo "IP Address: ${{ env.TSIP }}"
-        echo "Username:   ${{ env.USER }}"
-        echo "Password:   ${{ env.PASS }}"
-        echo "NoMachine Port: 4000"
+        echo "✅ Kali Linux is Ready!"
+        echo "🌐 Tailscale IP: ${{ env.TSIP }}"
+        echo "👤 Username:     ${{ env.USER }}"
+        echo "🔑 Password:     ${{ env.PASS }}"
+        echo "🖥️ Protocol:     NoMachine (NX)"
+        echo "🚪 Port:         4000"
         echo "------------------------------------------"
 
-    - name: Keep Alive (Wait for 6 hours)
+    - name: Keep Alive Loop
       run: |
-        # سيبقى السيرفر يعمل حتى تنهي المهمة يدوياً أو تنتهي المدة
+        echo "Server is running... You can connect now."
+        # سيبقى السيرفر يعمل لمدة 6 ساعات أو حتى تقوم بإلغاء المهمة
         for i in {1..72}; do
-          echo "[$(date)] Serevr is running... (Step $i/72)"
+          echo "[$(date)] Keep-alive: Kali GUI is active..."
           sleep 300
         done
