@@ -12,8 +12,8 @@ jobs:
     - name: Install Docker
       run: |
         sudo apt update
-        sudo apt install -y docker.io
-        sudo systemctl start docker
+        docker --version
+        sudo docker info
 
     - name: Pull Kali Image
       run: |
