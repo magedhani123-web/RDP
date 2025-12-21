@@ -13,7 +13,6 @@ jobs:
       run: |
         sudo apt update
         docker --version
-        sudo docker info
 
     - name: Pull Kali Image
       run: |
@@ -31,7 +30,7 @@ jobs:
       run: |
         sudo docker exec kali bash -c "
           apt update &&
-          apt install -y xfce4 xfce4-goodies dbus-x11 wget curl sudo &&
+          DEBIAN_FRONTEND=noninteractive apt install -y xfce4 xfce4-goodies dbus-x11 wget curl sudo &&
           wget https://web9001.nomachine.com/download/9.3/Linux/nomachine_9.3.7_1_amd64.deb &&
           dpkg -i nomachine_*.deb || apt --fix-broken install -y
         "
@@ -47,51 +46,42 @@ jobs:
         echo "USER=kaliuser" >> $GITHUB_ENV
         echo "PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Start NoMachine
+    - name: Start NoMachine & DBUS
       run: |
-        sudo docker exec kali /usr/NX/bin/nxserver --start
+        sudo docker exec kali bash -c "service dbus start && /usr/NX/bin/nxserver --start"
         sudo docker exec kali /usr/NX/bin/nxserver --status
 
     - name: Install Tailscale
       run: |
-        sudo docker exec kali bash -c "
-          curl -fsSL https://tailscale.com/install.sh | sh
-        "
+        sudo docker exec kali bash -c "curl -fsSL https://tailscale.com/install.sh | sh"
 
-- name: Start Tailscale (Docker SAFE)
-  env:
-    TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-  run: |
-    sudo docker exec kali bash -c "
-      pkill tailscaled || true
-      tailscaled --tun=userspace-networking --state=/tmp/tailscale.state &
-      sleep 6
-      tailscale up \
-        --authkey=${TAILSCALE_AUTH_KEY} \
-        --hostname=kali-gh \
-        --accept-routes
-      tailscale ip -4
-    " | tee ts.log
-
-    TSIP=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' ts.log | tail -1)
-    echo "TSIP=$TSIP" >> $GITHUB_ENV
-
-
-    - name: Show Connection Info
+    - name: Start Tailscale (Userspace Mode)
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        echo ""
-        echo "========== Kali NoMachine =========="
-        echo "IP:       $TSIP"
-        echo "User:     $USER"
-        echo "Password: $PASS"
-        echo "Port:     4000"
-        echo "Protocol: NX"
-        echo "==================================="
-        echo ""
+        # تشغيل tailscaled في الخلفية داخل الحاوية
+        sudo docker exec -d kali bash -c "tailscaled --tun=userspace-networking --state=/tmp/tailscale.state"
+        sleep 5
+        # تسجيل الدخول
+        sudo docker exec kali tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-gh
+        # جلب عنوان IP
+        TSIP=$(sudo docker exec kali tailscale ip -4)
+        echo "TSIP=$TSIP" >> $GITHUB_ENV
 
-    - name: Keep Alive
+    - name: Connection Information
       run: |
-        while true; do
-          echo "[$(date)] Kali GUI Active"
+        echo "------------------------------------------"
+        echo "Kali Linux is ready!"
+        echo "IP Address: ${{ env.TSIP }}"
+        echo "Username:   ${{ env.USER }}"
+        echo "Password:   ${{ env.PASS }}"
+        echo "NoMachine Port: 4000"
+        echo "------------------------------------------"
+
+    - name: Keep Alive (Wait for 6 hours)
+      run: |
+        # سيبقى السيرفر يعمل حتى تنهي المهمة يدوياً أو تنتهي المدة
+        for i in {1..72}; do
+          echo "[$(date)] Serevr is running... (Step $i/72)"
           sleep 300
         done
