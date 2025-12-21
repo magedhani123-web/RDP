@@ -49,6 +49,7 @@ jobs:
 
     - name: Start NoMachine
       run: |
+        sudo docker exec kali /usr/NX/bin/nxserver --start
         sudo docker exec kali /usr/NX/bin/nxserver --status
 
     - name: Install Tailscale
@@ -58,19 +59,19 @@ jobs:
         "
 
     - name: Start Tailscale (Docker way)
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
         sudo docker exec kali bash -c "
           tailscaled --tun=userspace-networking &
-          sleep 3
+          sleep 5
           tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-gh
           tailscale ip -4
         " | tee ts.log
 
-       TSIP=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' ts.log | tail -1)
-       echo "TSIP=$TSIP" >> $GITHUB_ENV
-       env:
-       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-    
+        TSIP=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' ts.log | tail -1)
+        echo "TSIP=$TSIP" >> $GITHUB_ENV
+
     - name: Show Connection Info
       run: |
         echo ""
