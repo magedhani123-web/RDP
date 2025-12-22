@@ -45,52 +45,51 @@ jobs:
 
     - name: Start NoMachine & Desktop Services
       run: |
-        # تشغيل الخدمات يدوياً لتجاوز غياب systemd
+        # تشغيل DBUS و NoMachine يدوياً لتجاوز غياب systemd
         sudo docker exec kali bash -c "
           mkdir -p /var/run/dbus
           dbus-daemon --system --fork
           /usr/NX/bin/nxserver --startup
         "
 
-    - name: Install & Fix Tailscale (No systemd Mode)
+    - name: Install & Fix Tailscale (Manual Mode)
       env:
         TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        # تثبيت Tailscale
+        # تثبيت Tailscale داخل الحاوية
         sudo docker exec kali bash -c "curl -fsSL https://tailscale.com/install.sh | sh"
         
-        # إنشاء المجلدات الضرورية
+        # إنشاء المجلدات الضرورية لتخزين بيانات الشبكة
         sudo docker exec kali mkdir -p /var/run/tailscale /var/lib/tailscale
         
-        # تشغيل المحرك يدوياً في الخلفية (Userspace Networking)
+        # تشغيل المحرك يدوياً بدون استخدام systemctl
         sudo docker exec -d kali bash -c "tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state"
         
-        # الانتظار للتأكد من تشغيل الخدمة
+        # الانتظار 5 ثوانٍ ليعمل المحرك
         sleep 5
         
-        # ربط الجهاز بالشبكة
+        # ربط الحاوية بحسابك في Tailscale
         sudo docker exec kali tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=kali-gh
         
-        # جلب الـ IP
+        # استخراج عنوان IP الخاص بـ Tailscale
         TSIP=$(sudo docker exec kali tailscale ip -4)
         echo "TSIP=$TSIP" >> $GITHUB_ENV
 
-    - name: Display Connection Credentials
+    - name: Connection Information
       run: |
         echo "------------------------------------------"
-        echo "✅ Kali Linux is Ready!"
-        echo "🌐 Tailscale IP: ${{ env.TSIP }}"
-        echo "👤 Username:     ${{ env.USER }}"
-        echo "🔑 Password:     ${{ env.PASS }}"
-        echo "🖥️ Protocol:     NoMachine (NX)"
-        echo "🚪 Port:         4000"
+        echo "✅ تمت العملية بنجاح!"
+        echo "🌐 IP (Tailscale): ${{ env.TSIP }}"
+        echo "👤 Username:       ${{ env.USER }}"
+        echo "🔑 Password:       ${{ env.PASS }}"
+        echo "🖥️ Port:           4000"
         echo "------------------------------------------"
 
     - name: Keep Alive Loop
       run: |
-        echo "Server is running... You can connect now."
-        # سيبقى السيرفر يعمل لمدة 6 ساعات أو حتى تقوم بإلغاء المهمة
+        echo "الخادم يعمل الآن... يمكنك الاتصال عبر برنامج NoMachine."
+        # استمرار العمل لمدة 6 ساعات
         for i in {1..72}; do
-          echo "[$(date)] Keep-alive: Kali GUI is active..."
+          echo "[$(date)] الخادم نشط..."
           sleep 300
         done
